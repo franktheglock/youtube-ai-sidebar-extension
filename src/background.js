@@ -19,7 +19,35 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'capture-visible-tab') {
+    chrome.tabs.captureVisibleTab(sender?.tab?.windowId, { format: 'png' }, (dataUrl) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+
+      if (typeof dataUrl !== 'string' || !dataUrl) {
+        sendResponse({ ok: false, error: 'Visible tab capture returned no image.' });
+        return;
+      }
+
+      sendResponse({ ok: true, dataUrl });
+    });
+
+    return true;
+  }
+
+  if (message?.type === 'get-model-catalog') {
+    void handleGetModelCatalog(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'set-active-model') {
+    void handleSetActiveModel(message, sendResponse);
+    return true;
+  }
+
   if (message?.type !== 'open-options-page') {
     return false;
   }
@@ -80,53 +108,64 @@ async function handleChat(port, message) {
   try {
     const settings = await getSettings();
     const provider = getProviderConfig(settings);
-    const toolContext = await gatherWebContext({
-      port,
-      requestId: message.requestId,
-      settings,
-      title: message.title,
-      videoUrl: message.videoUrl,
-      transcriptStatus: message.transcriptStats?.status,
-      userMessage: message.userMessage,
-      signal: state.controller.signal
-    });
-
-    port.postMessage({
-      type: 'sources',
-      requestId: message.requestId,
-      sources: toolContext.sources
-    });
-
-    const finalMessages = buildAnswerMessages({
+    let finalSources = [];
+    const baseMessages = buildAnswerMessages({
       title: message.title,
       videoUrl: message.videoUrl,
       transcriptText: message.transcriptText,
       transcriptStats: message.transcriptStats,
       history: message.history,
       userMessage: message.userMessage,
-      toolMessages: toolContext.toolMessages
+      frameContext: message.frameContext,
+      toolMessages: []
     });
 
     sendAssistantStatus(port, message.requestId, 'Generating answer...');
 
-    await streamChatCompletion({
-      provider,
-      messages: finalMessages,
-      signal: state.controller.signal,
-      temperature: settings.temperature,
-      onChunk: (chunk) => {
-        port.postMessage({
-          type: 'assistant-chunk',
-          requestId: message.requestId,
-          chunk
-        });
-      }
-    });
+    if (supportsToolCalling(provider)) {
+      const result = await streamChatWithTools({
+        provider,
+        settings,
+        port,
+        requestId: message.requestId,
+        messages: baseMessages,
+        signal: state.controller.signal,
+        temperature: settings.temperature,
+        onChunk: (chunk) => {
+          port.postMessage({
+            type: 'assistant-chunk',
+            requestId: message.requestId,
+            chunk
+          });
+        }
+      });
+      finalSources = result.sources;
+
+      port.postMessage({
+        type: 'sources',
+        requestId: message.requestId,
+        sources: result.sources
+      });
+    } else {
+      await streamChatCompletion({
+        provider,
+        messages: baseMessages,
+        signal: state.controller.signal,
+        temperature: settings.temperature,
+        onChunk: (chunk) => {
+          port.postMessage({
+            type: 'assistant-chunk',
+            requestId: message.requestId,
+            chunk
+          });
+        }
+      });
+    }
 
     port.postMessage({
       type: 'assistant-done',
       requestId: message.requestId,
-      sources: toolContext.sources
+      sources: finalSources
     });
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -203,16 +242,21 @@ async function handleStarterQuestions(port, message) {
   }
 }
 
-function buildAnswerMessages({ title, videoUrl, transcriptText, transcriptStats, history, userMessage, toolMessages }) {
+function buildAnswerMessages({ title, videoUrl, transcriptText, transcriptStats, history, userMessage, frameContext, toolMessages }) {
   return [
     {
       role: 'system',
       content: [
         'You are an AI assistant embedded beside a YouTube video.',
+        'Available tools: web_search(query) to search the public web, and read_url(url) to open a specific URL.',
+        'Use tools whenever the user asks about current facts, historical facts, outside context, or comparisons that are not contained in the transcript.',
+        'If a tool is needed, do not answer from the transcript alone.',
         'Answer with concise Markdown.',
+        'Avoid Markdown tables unless they are absolutely necessary for clarity; prefer short paragraphs or bullet lists.',
         'Ground claims in the provided transcript whenever possible.',
         'When using transcript evidence, cite timestamps inline like [03:12] or [1:02:09].',
         'When using web/tool evidence, cite only with the provided numeric source markers like [1] and [2].',
+        'If the latest user turn includes an attached video frame image, treat it as additional visual context from the current point in the video.',
         'Do not invent citations or timestamps.',
         'If the transcript is incomplete or unavailable, say so plainly.',
         'If the user asks for outside context, you may rely on tool results already provided.',
@@ -228,7 +272,32 @@ function buildAnswerMessages({ title, videoUrl, transcriptText, transcriptStats,
     ...toolMessages,
     {
       role: 'user',
-      content: userMessage
+      content: buildUserTurnContent(userMessage, frameContext)
+    }
+  ];
+}
+
+function buildUserTurnContent(userMessage, frameContext) {
+  const text = String(userMessage || '').trim();
+  if (!frameContext?.imageUrl) {
+    return text;
+  }
+
+  const timestamp = String(frameContext.timestamp || '').trim();
+  const preface = timestamp
+    ? `${text}\n\nAttached video frame timestamp: [${timestamp}]. Use the image as additional context when it is relevant.`
+    : `${text}\n\nAn attached video frame is included as additional context. Use the image when it is relevant.`;
+
+  return [
+    {
+      type: 'text',
+      text: preface
+    },
+    {
+      type: 'image_url',
+      image_url: {
+        url: frameContext.imageUrl
+      }
     }
   ];
 }
@@ -370,7 +439,7 @@ async function streamChatCompletion({ provider, messages, signal, temperature, o
           if (typeof reasoningChunk === 'string' && reasoningChunk.length > 0) {
             if (!hasStartedReasoning) {
               hasStartedReasoning = true;
-              onChunk('<details><summary>Thought Process</summary>\n\n');
+              onChunk('<details class="thinking-pill"><summary><span class="thinking-pill__label">Thought Process</span><span class="thinking-pill__preview"></span></summary><div class="thinking-pill__body">');
             }
             onChunk(reasoningChunk);
           }
@@ -500,7 +569,7 @@ function extractDuckDuckGoResults(html) {
   let match;
 
   while ((match = regex.exec(html)) !== null) {
-    const href = decodeEntities(match[1] || '');
+    const href = resolveDuckDuckGoResultUrl(decodeEntities(match[1] || ''));
     const title = collapseWhitespace(decodeEntities(stripHtmlTags(match[2] || '')));
     const snippet = collapseWhitespace(decodeEntities(stripHtmlTags(match[3] || '')));
 
@@ -512,6 +581,23 @@ function extractDuckDuckGoResults(html) {
   }
 
   return results;
+}
+
+function resolveDuckDuckGoResultUrl(url) {
+  const decoded = decodeEntities(String(url || '').trim());
+  if (!decoded) {
+    return '';
+  }
+
+  const absolute = decoded.startsWith('//') ? `https:${decoded}` : decoded;
+
+  try {
+    const parsed = new URL(absolute, 'https://html.duckduckgo.com');
+    const target = parsed.searchParams.get('uddg');
+    return target ? decodeURIComponent(target) : parsed.toString();
+  } catch {
+    return absolute;
+  }
 }
 
 async function readUrl(targetUrl, sources, sourceByUrl, signal) {
@@ -616,6 +702,147 @@ function getSettings() {
   });
 }
 
+function setSettings(nextSettings) {
+  return new Promise((resolve) => {
+    chrome.storage.sync.set(nextSettings, () => {
+      resolve({ ...DEFAULT_SETTINGS, ...nextSettings });
+    });
+  });
+}
+
+async function handleGetModelCatalog(sendResponse) {
+  try {
+    const settings = await getSettings();
+    const catalog = await getModelCatalog(settings);
+    sendResponse({ ok: true, ...catalog });
+  } catch (error) {
+    sendResponse({
+      ok: false,
+      error: error instanceof Error ? error.message : 'The model catalog could not be loaded.'
+    });
+  }
+}
+
+async function handleSetActiveModel(message, sendResponse) {
+  const provider = String(message?.provider || '').trim();
+  const model = String(message?.model || '').trim();
+
+  if (!provider || !model) {
+    sendResponse({ ok: false, error: 'A provider and model are required.' });
+    return;
+  }
+
+  try {
+    const settings = await getSettings();
+    const nextSettings = await setSettings({
+      ...settings,
+      provider,
+      model
+    });
+    sendResponse({ ok: true, settings: nextSettings });
+  } catch (error) {
+    sendResponse({
+      ok: false,
+      error: error instanceof Error ? error.message : 'The active model could not be updated.'
+    });
+  }
+}
+
+async function getModelCatalog(settings) {
+  const providers = buildProviderCatalogConfigs(settings);
+  const groups = [];
+
+  for (const provider of providers) {
+    const result = await fetchProviderModels(provider);
+    groups.push(result);
+  }
+
+  return {
+    settings,
+    groups
+  };
+}
+
+function buildProviderCatalogConfigs(settings) {
+  return [
+    {
+      key: 'openrouter',
+      label: 'OpenRouter',
+      enabled: Boolean(settings.openrouterApiKey),
+      reason: settings.openrouterApiKey ? '' : 'OpenRouter API key is missing.',
+      configFactory: () => getProviderConfig({ ...settings, provider: 'openrouter' })
+    },
+    {
+      key: 'lmstudio',
+      label: 'LM Studio',
+      enabled: true,
+      reason: '',
+      configFactory: () => getProviderConfig({ ...settings, provider: 'lmstudio' })
+    },
+    {
+      key: 'nvidia-nim',
+      label: 'NVIDIA NIM',
+      enabled: Boolean(settings.nvidiaNimApiKey),
+      reason: settings.nvidiaNimApiKey ? '' : 'NVIDIA NIM API key is missing.',
+      configFactory: () => getProviderConfig({ ...settings, provider: 'nvidia-nim' })
+    }
+  ];
+}
+
+async function fetchProviderModels(providerDescriptor) {
+  if (!providerDescriptor.enabled) {
+    return {
+      provider: providerDescriptor.key,
+      label: providerDescriptor.label,
+      available: false,
+      error: providerDescriptor.reason,
+      models: []
+    };
+  }
+
+  try {
+    const config = providerDescriptor.configFactory();
+    const response = await fetch(`${config.baseUrl}/models`, {
+      method: 'GET',
+      headers: config.headers
+    });
+
+    if (!response.ok) {
+      throw new Error(await buildHttpError(response));
+    }
+
+    const payload = await response.json();
+    return {
+      provider: providerDescriptor.key,
+      label: providerDescriptor.label,
+      available: true,
+      error: '',
+      models: normalizeModelCatalog(payload)
+    };
+  } catch (error) {
+    return {
+      provider: providerDescriptor.key,
+      label: providerDescriptor.label,
+      available: false,
+      error: error instanceof Error ? error.message : `The ${providerDescriptor.label} catalog could not be loaded.`,
+      models: []
+    };
+  }
+}
+
+function normalizeModelCatalog(payload) {
+  const entries = Array.isArray(payload?.data) ? payload.data : [];
+  return entries
+    .map((entry) => ({
+      id: String(entry?.id || '').trim(),
+      name: String(entry?.name || entry?.id || '').trim(),
+      ownedBy: String(entry?.owned_by || entry?.publisher || '').trim(),
+      contextLength: Number(entry?.context_length || entry?.max_context_length || entry?.top_provider?.context_length || 0) || 0
+    }))
+    .filter((entry) => entry.id)
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
 function buildFallbackQuestions(title) {
   return [
     `What are the main takeaways from ${trimTitle(title)}?`,
@@ -681,25 +908,18 @@ function normalizeOpenAiCompatibleBaseUrl(url) {
 
 function normalizeMessagesForProvider(provider, messages) {
   const cleanedMessages = (Array.isArray(messages) ? messages : []).filter(
-    (message) => message && typeof message.content === 'string' && message.content.trim().length > 0
+    (message) => message && hasUsableMessagePayload(message)
   );
-
-  if (provider?.kind !== 'lmstudio') {
-    return cleanedMessages;
-  }
 
   const systemBlocks = cleanedMessages
     .filter((message) => message.role === 'system')
-    .map((message) => message.content.trim())
+    .map((message) => flattenMessageContentToText(message.content).trim())
     .filter(Boolean);
 
   const nonSystemMessages = cleanedMessages
-    .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .map((message) => ({
-      role: message.role,
-      content: message.content.trim()
-    }))
-    .filter((message) => message.content.length > 0);
+    .filter((message) => message.role !== 'system')
+    .map((message) => normalizeConversationMessage(message))
+    .filter((message) => hasUsableMessagePayload(message));
 
   if (systemBlocks.length === 0) {
     return nonSystemMessages;
@@ -715,7 +935,7 @@ function normalizeMessagesForProvider(provider, messages) {
     return [
       {
         role: 'user',
-        content: `${systemPreamble}\n\nUser request:\n${firstMessage.content}`
+        content: prependSystemPreambleToContent(firstMessage.content, systemPreamble)
       },
       ...rest
     ];
@@ -724,6 +944,123 @@ function normalizeMessagesForProvider(provider, messages) {
   return [
     { role: 'user', content: systemPreamble },
     ...nonSystemMessages
+  ];
+}
+
+function hasUsableMessageContent(content) {
+  if (typeof content === 'string') {
+    return content.trim().length > 0;
+  }
+
+  if (!Array.isArray(content)) {
+    return false;
+  }
+
+  return normalizeMessageContent(content).length > 0;
+}
+
+function hasUsableMessagePayload(message) {
+  if (!message) {
+    return false;
+  }
+
+  if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    return true;
+  }
+
+  if (message.role === 'tool') {
+    return typeof message.tool_call_id === 'string' && hasUsableMessageContent(message.content);
+  }
+
+  return hasUsableMessageContent(message.content);
+}
+
+function normalizeConversationMessage(message) {
+  if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    return {
+      role: 'assistant',
+      content: typeof message.content === 'string' ? message.content : flattenMessageContentToText(message.content),
+      tool_calls: message.tool_calls
+    };
+  }
+
+  if (message.role === 'tool') {
+    return {
+      role: 'tool',
+      tool_call_id: message.tool_call_id,
+      content: flattenMessageContentToText(message.content)
+    };
+  }
+
+  return {
+    role: message.role,
+    content: normalizeMessageContent(message.content)
+  };
+}
+
+function normalizeMessageContent(content) {
+  if (typeof content === 'string') {
+    return content.trim();
+  }
+
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .map((item) => {
+      if (item?.type === 'text' && typeof item.text === 'string' && item.text.trim()) {
+        return {
+          type: 'text',
+          text: item.text.trim()
+        };
+      }
+
+      if (item?.type === 'image_url' && typeof item.image_url?.url === 'string' && item.image_url.url.trim()) {
+        return {
+          type: 'image_url',
+          image_url: {
+            url: item.image_url.url.trim()
+          }
+        };
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function flattenMessageContentToText(content) {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .filter((item) => item?.type === 'text' && typeof item.text === 'string')
+    .map((item) => item.text)
+    .join('\n\n');
+}
+
+function prependSystemPreambleToContent(content, systemPreamble) {
+  if (typeof content === 'string') {
+    return `${systemPreamble}\n\nUser request:\n${content}`;
+  }
+
+  const normalized = normalizeMessageContent(content);
+  if (!normalized.length) {
+    return systemPreamble;
+  }
+
+  return [
+    {
+      type: 'text',
+      text: `${systemPreamble}\n\nUser request:`
+    },
+    ...normalized
   ];
 }
 
@@ -769,62 +1106,6 @@ async function buildHttpError(response) {
   return `Request failed with ${response.status}${body ? `: ${body.slice(0, 400)}` : ''}`;
 }
 
-async function gatherWebContext({ port, requestId, settings, title, videoUrl, transcriptStatus, userMessage, signal }) {
-  const sources = [];
-  const sourceByUrl = new Map();
-  const toolMessages = [];
-  const urls = extractUrls(userMessage).slice(0, 2);
-
-  for (const targetUrl of urls) {
-    try {
-      sendAssistantStatus(port, requestId, `Reading ${formatStatusUrl(targetUrl)}...`);
-      const result = await readUrl(targetUrl, sources, sourceByUrl, signal);
-      toolMessages.push({
-        role: 'system',
-        content: [
-          'External URL context:',
-          result.text,
-          'Use the provided numeric source markers when citing these claims.'
-        ].join('\n\n')
-      });
-    } catch (error) {
-      toolMessages.push({
-        role: 'system',
-        content: [
-          `External URL fetch failed for ${targetUrl}.`,
-          error instanceof Error ? error.message : 'Unknown error.'
-        ].join('\n\n')
-      });
-    }
-  }
-
-  if (shouldUseWebSearch({ userMessage, transcriptStatus }) && !signal.aborted) {
-    const searchQuery = buildWebSearchQuery({ title, userMessage, videoUrl });
-    try {
-      sendAssistantStatus(port, requestId, 'Searching the web...');
-      const result = await webSearch(searchQuery, settings.searxngBaseUrl, sources, sourceByUrl, signal);
-      toolMessages.push({
-        role: 'system',
-        content: [
-          'Web search context:',
-          result.text,
-          'Use the provided numeric source markers when citing these claims.'
-        ].join('\n\n')
-      });
-    } catch (error) {
-      toolMessages.push({
-        role: 'system',
-        content: [
-          `Web search failed for query: ${searchQuery}`,
-          error instanceof Error ? error.message : 'Unknown error.'
-        ].join('\n\n')
-      });
-    }
-  }
-
-  return { sources, toolMessages };
-}
-
 function sendAssistantStatus(port, requestId, status) {
   if (!port || !requestId || !status) {
     return;
@@ -837,57 +1118,262 @@ function sendAssistantStatus(port, requestId, status) {
   });
 }
 
-function extractUrls(text) {
-  if (typeof text !== 'string') {
-    return [];
-  }
-
-  return Array.from(text.matchAll(/https?:\/\/[^\s)\]>"']+/gi), (match) => match[0]);
-}
-
-function shouldUseWebSearch({ userMessage, transcriptStatus }) {
-  const normalized = String(userMessage || '').toLowerCase();
-  if (!normalized.trim()) {
-    return false;
-  }
-
-  const explicitSearchHints = [
-    'search',
-    'look up',
-    'web',
-    'online',
-    'internet',
-    'google',
-    'news',
-    'latest',
-    'current',
-    'today',
-    'recent',
-    'source',
-    'sources',
-    'citation',
-    'citations',
-    'reference',
-    'references'
-  ];
-
-  if (explicitSearchHints.some((hint) => normalized.includes(hint))) {
-    return true;
-  }
-
-  return String(transcriptStatus || '').toLowerCase() !== 'transcript ready';
-}
-
-function buildWebSearchQuery({ title, userMessage, videoUrl }) {
-  const trimmedTitle = trimTitle(title);
-  const query = collapseWhitespace(userMessage).slice(0, 180);
-  return `${query} ${trimmedTitle} ${videoUrl}`.trim();
-}
-
 function formatStatusUrl(targetUrl) {
   try {
     return new URL(targetUrl).hostname.replace(/^www\./i, '');
   } catch {
     return targetUrl;
   }
+}
+
+async function streamChatWithTools({ provider, settings, port, requestId, messages, signal, temperature, onChunk }) {
+  const workingMessages = [...messages];
+  const sources = [];
+  const sourceByUrl = new Map();
+
+  const keepAliveInterval = setInterval(() => {
+    try { chrome.runtime.getPlatformInfo(); } catch {}
+  }, 20000);
+
+  try {
+    while (!signal.aborted) {
+      const normalizedMessages = normalizeMessagesForProvider(provider, workingMessages);
+
+      const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: provider.headers,
+        signal,
+        body: JSON.stringify({
+          model: provider.model,
+          messages: normalizedMessages,
+          stream: true,
+          temperature,
+          tools: getChatTools(),
+          tool_choice: 'auto'
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(await buildHttpError(response));
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('Streaming response body was unavailable.');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let contentSoFar = '';
+      const toolCallAccumulator = {};
+      let hasStartedReasoning = false;
+      let hasEndedReasoning = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+
+        for (const part of parts) {
+          for (const line of part.split('\n')) {
+            if (!line.startsWith('data:')) {
+              continue;
+            }
+
+            const payload = line.slice(5).trim();
+            if (!payload || payload === '[DONE]') {
+              continue;
+            }
+
+            const data = safeJsonParse(payload);
+            const delta = data?.choices?.[0]?.delta;
+            if (!delta) {
+              continue;
+            }
+
+            if (Array.isArray(delta.tool_calls)) {
+              for (const tc of delta.tool_calls) {
+                const idx = tc.index ?? 0;
+                if (!toolCallAccumulator[idx]) {
+                  toolCallAccumulator[idx] = {
+                    id: tc.id || '',
+                    type: 'function',
+                    function: { name: '', arguments: '' }
+                  };
+                }
+                if (tc.id) {
+                  toolCallAccumulator[idx].id = tc.id;
+                }
+                if (tc.function?.name) {
+                  toolCallAccumulator[idx].function.name += tc.function.name;
+                }
+                if (tc.function?.arguments) {
+                  toolCallAccumulator[idx].function.arguments += tc.function.arguments;
+                }
+              }
+            }
+
+            const reasoningChunk = delta.reasoning_content;
+            if (typeof reasoningChunk === 'string' && reasoningChunk.length > 0) {
+              if (!hasStartedReasoning) {
+                hasStartedReasoning = true;
+                onChunk('<details class="thinking-pill"><summary><span class="thinking-pill__label">Thought Process</span><span class="thinking-pill__preview"></span></summary><div class="thinking-pill__body">');
+              }
+              onChunk(reasoningChunk);
+            }
+
+            const chunk = delta.content;
+            if (typeof chunk === 'string' && chunk.length > 0) {
+              if (hasStartedReasoning && !hasEndedReasoning) {
+                hasEndedReasoning = true;
+                onChunk('\n\n</details>\n\n');
+              }
+              contentSoFar += chunk;
+              onChunk(chunk);
+            }
+          }
+        }
+      }
+
+      if (hasStartedReasoning && !hasEndedReasoning) {
+        hasEndedReasoning = true;
+        onChunk('\n\n</details>\n\n');
+      }
+
+      const toolCalls = Object.values(toolCallAccumulator);
+      if (!toolCalls.length) {
+        return { sources };
+      }
+
+      // Tools were called — clear streamed content and execute
+      port.postMessage({ type: 'assistant-clear', requestId });
+
+      workingMessages.push({
+        role: 'assistant',
+        content: contentSoFar || '',
+        tool_calls: toolCalls
+      });
+
+      for (const toolCall of toolCalls) {
+        const toolResult = await executeToolCall({
+          toolCall, settings, sources, sourceByUrl, signal, port, requestId
+        });
+
+        workingMessages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: toolResult
+        });
+      }
+
+      // Send sources live so citations render during the next pass
+      port.postMessage({ type: 'sources', requestId, sources });
+    }
+
+    throw new DOMException('The request was aborted.', 'AbortError');
+  } finally {
+    clearInterval(keepAliveInterval);
+  }
+}
+
+async function executeToolCall({ toolCall, settings, sources, sourceByUrl, signal, port, requestId }) {
+  const toolName = toolCall?.function?.name;
+  const rawArguments = toolCall?.function?.arguments;
+  const args = safeJsonParse(rawArguments || '{}') || {};
+
+  if (toolName === 'web_search') {
+    const query = collapseWhitespace(args.query || '').slice(0, 180);
+    if (!query) {
+      return 'web_search failed: missing query.';
+    }
+
+    sendAssistantStatus(port, requestId, 'Searching the web...');
+    try {
+      const result = await webSearch(query, settings, sources, sourceByUrl, signal);
+      return result.text;
+    } catch (error) {
+      return `web_search failed for query: ${query}\n\n${error instanceof Error ? error.message : 'Unknown error.'}`;
+    }
+  }
+
+  if (toolName === 'read_url') {
+    const url = String(args.url || '').trim();
+    if (!url) {
+      return 'read_url failed: missing url.';
+    }
+
+    sendAssistantStatus(port, requestId, `Reading ${formatStatusUrl(url)}...`);
+    try {
+      const result = await readUrl(url, sources, sourceByUrl, signal);
+      return result.text;
+    } catch (error) {
+      return `read_url failed for ${url}\n\n${error instanceof Error ? error.message : 'Unknown error.'}`;
+    }
+  }
+
+  return `Unknown tool: ${toolName || 'unnamed tool'}`;
+}
+
+function getChatTools() {
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'web_search',
+        description: 'Search the public web for outside context, current facts, or historical information not present in the video transcript.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'A short targeted search query.'
+            }
+          },
+          required: ['query'],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_url',
+        description: 'Fetch and read a specific HTTP or HTTPS URL when the user provides a link or when search results need to be opened.',
+        parameters: {
+          type: 'object',
+          properties: {
+            url: {
+              type: 'string',
+              description: 'The absolute URL to fetch.'
+            }
+          },
+          required: ['url'],
+          additionalProperties: false
+        }
+      }
+    }
+  ];
+}
+
+function supportsToolCalling(provider) {
+  return provider?.kind === 'openrouter' || provider?.kind === 'nvidia-nim' || provider?.kind === 'lmstudio';
+}
+
+function flattenAssistantMessageContent(content) {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .map((item) => item?.text || '')
+    .join('');
 }
