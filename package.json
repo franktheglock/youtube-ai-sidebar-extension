@@ -1,0 +1,17 @@
+{
+  "name": "youtube-ai-sidebar-extension",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.7",
+    "marked": "^16.1.1",
+    "youtube-transcript": "^1.2.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.4"
+  }
+}
