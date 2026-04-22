@@ -1,6 +1,6 @@
 # YouTube AI Sidebar Extension
 
-A Chrome extension that adds an AI chat sidebar directly to YouTube watch pages.
+A Chrome extension that adds an AI chat sidebar directly to YouTube watch pages using models that YOU chose! (some of which are free!)
 
 It pulls the current video's transcript, streams answers in place, links timestamp mentions back to the player, and can enrich answers with lightweight web context when the user asks for outside information.
 
@@ -89,4 +89,4 @@ Before pushing to GitHub or shipping the extension:
 
 ## License
 
-No license file has been added yet. If you plan to make the repository public, add one before publishing.
+This project is licensed under the Apache License 2.0. See the `LICENSE` file for the full text.

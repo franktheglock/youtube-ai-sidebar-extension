@@ -6,6 +6,7 @@ const DEFAULT_SETTINGS = {
   nvidiaNimBaseUrl: 'https://integrate.api.nvidia.com/v1',
   nvidiaNimApiKey: '',
   openrouterBaseUrl: 'https://openrouter.ai/api/v1',
+  searchProvider: 'duckduckgo',
   searxngBaseUrl: 'http://192.168.1.70:8888',
   temperature: 0.2
 };
@@ -215,7 +216,8 @@ function buildAnswerMessages({ title, videoUrl, transcriptText, transcriptStats,
         'Do not invent citations or timestamps.',
         'If the transcript is incomplete or unavailable, say so plainly.',
         'If the user asks for outside context, you may rely on tool results already provided.',
-        'Keep answers specific to the current video unless the user asks otherwise.'
+        'Keep answers specific to the current video unless the user asks otherwise.',
+        'do not overly use the tool results, only use them when the question explicitly requires information that is not in the video transcript.'
       ].join('\n')
     },
     {
@@ -394,10 +396,60 @@ async function streamChatCompletion({ provider, messages, signal, temperature, o
   }
 }
 
-async function webSearch(query, searxngBaseUrl, sources, sourceByUrl, signal) {
+async function webSearch(query, settings, sources, sourceByUrl, signal) {
   if (typeof query !== 'string' || query.trim().length === 0) {
     return { text: 'Search failed: empty query.' };
   }
+
+  if (settings.searchProvider === 'searxng') {
+    return searchWithSearxng(query, settings.searxngBaseUrl, sources, sourceByUrl, signal);
+  }
+
+  return searchWithDuckDuckGo(query, sources, sourceByUrl, signal);
+}
+
+async function searchWithDuckDuckGo(query, sources, sourceByUrl, signal) {
+  const url = new URL('https://html.duckduckgo.com/html/');
+  url.searchParams.set('q', query.trim());
+
+  const response = await fetch(url.toString(), {
+    signal,
+    headers: {
+      'Accept-Language': 'en-US,en;q=0.9'
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`DuckDuckGo search failed with ${response.status}`);
+  }
+
+  const html = await response.text();
+  const results = extractDuckDuckGoResults(html).slice(0, 5);
+  if (results.length === 0) {
+    return { text: `No search results found for ${query}.` };
+  }
+
+  const lines = [`Search query: ${query}`];
+
+  for (const result of results) {
+    const source = registerSource({
+      url: result.url,
+      title: result.title || result.url,
+      sourceByUrl,
+      sources
+    });
+    lines.push(`[${source.id}] ${source.title}`);
+    lines.push(result.url);
+    if (typeof result.snippet === 'string' && result.snippet.trim()) {
+      lines.push(result.snippet.trim());
+    }
+    lines.push('Search engine: DuckDuckGo');
+    lines.push('');
+  }
+
+  return { text: lines.join('\n') };
+}
+
+async function searchWithSearxng(query, searxngBaseUrl, sources, sourceByUrl, signal) {
 
   const url = new URL('/search', normalizeBaseUrl(searxngBaseUrl));
   url.searchParams.set('q', query.trim());
@@ -436,6 +488,30 @@ async function webSearch(query, searxngBaseUrl, sources, sourceByUrl, signal) {
   }
 
   return { text: lines.join('\n') };
+}
+
+function extractDuckDuckGoResults(html) {
+  if (typeof html !== 'string' || !html.trim()) {
+    return [];
+  }
+
+  const results = [];
+  const regex = /<a[^>]*class="[^\"]*result__a[^\"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]*class="[^\"]*result__snippet[^\"]*"[^>]*>|<div[^>]*class="[^\"]*result__snippet[^\"]*"[^>]*>)([\s\S]*?)(?:<\/a>|<\/div>)/gi;
+  let match;
+
+  while ((match = regex.exec(html)) !== null) {
+    const href = decodeEntities(match[1] || '');
+    const title = collapseWhitespace(decodeEntities(stripHtmlTags(match[2] || '')));
+    const snippet = collapseWhitespace(decodeEntities(stripHtmlTags(match[3] || '')));
+
+    if (!/^https?:\/\//i.test(href)) {
+      continue;
+    }
+
+    results.push({ url: href, title, snippet });
+  }
+
+  return results;
 }
 
 async function readUrl(targetUrl, sources, sourceByUrl, signal) {
@@ -580,6 +656,10 @@ function safeJsonParse(text) {
 
 function normalizeBaseUrl(url) {
   return String(url || '').replace(/\/+$/, '');
+}
+
+function stripHtmlTags(text) {
+  return String(text || '').replace(/<[^>]+>/g, ' ');
 }
 
 function normalizeOpenAiCompatibleBaseUrl(url) {

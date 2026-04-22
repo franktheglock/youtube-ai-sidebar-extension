@@ -6,6 +6,7 @@ const DEFAULT_SETTINGS = {
   nvidiaNimBaseUrl: 'https://integrate.api.nvidia.com/v1',
   nvidiaNimApiKey: '',
   openrouterBaseUrl: 'https://openrouter.ai/api/v1',
+  searchProvider: 'duckduckgo',
   searxngBaseUrl: 'http://192.168.1.70:8888',
   temperature: 0.2
 };
@@ -158,6 +159,13 @@ async function render() {
             </select>
           </label>
           <label>
+            Search provider
+            <select name="searchProvider">
+              <option value="duckduckgo" ${settings.searchProvider === 'duckduckgo' ? 'selected' : ''}>DuckDuckGo</option>
+              <option value="searxng" ${settings.searchProvider === 'searxng' ? 'selected' : ''}>SearxNG</option>
+            </select>
+          </label>
+          <label>
             Model
             <input name="model" value="${escapeHtml(settings.model)}" />
           </label>
@@ -193,7 +201,7 @@ async function render() {
           </label>
         </section>
         <section class="panel">
-          <p class="note">The extension streams final answers from the selected provider. Before the streamed response starts, it can keep using your SearxNG instance and direct URL reads until the planner decides it has enough context.</p>
+          <p class="note">The extension streams final answers from the selected model provider. Before the streamed response starts, it can also read pasted URLs and run web lookups through the selected search provider.</p>
           <div class="actions">
             <button type="submit">Save settings</button>
             <span class="status" data-role="status">Settings are stored in chrome.storage.sync.</span>
@@ -217,6 +225,7 @@ async function render() {
       nvidiaNimBaseUrl: String(formData.get('nvidiaNimBaseUrl') || DEFAULT_SETTINGS.nvidiaNimBaseUrl),
       nvidiaNimApiKey: String(formData.get('nvidiaNimApiKey') || ''),
       openrouterBaseUrl: String(formData.get('openrouterBaseUrl') || DEFAULT_SETTINGS.openrouterBaseUrl),
+      searchProvider: String(formData.get('searchProvider') || DEFAULT_SETTINGS.searchProvider),
       searxngBaseUrl: String(formData.get('searxngBaseUrl') || DEFAULT_SETTINGS.searxngBaseUrl),
       temperature: Number(formData.get('temperature') || DEFAULT_SETTINGS.temperature)
     };
