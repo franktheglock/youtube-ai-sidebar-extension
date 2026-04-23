@@ -301,7 +301,8 @@ async function handleStarterQuestions(port, message) {
           '- Exactly 3 questions.',
           '- Each question should be 4 to 12 words.',
           '- Make them concrete and answerable from the transcript.',
-          '- Avoid generic phrasing like "What is this video about?" unless the transcript is too thin.'
+          '- Avoid generic phrasing like "What is this video about?" unless the transcript is too thin.',
+          '- NEVER output statements. Your output must strictly consist of questions ending in a question mark.'
         ].join('\n')
       },
       {
