@@ -19,3 +19,6 @@ Thumbs.db
 # Testing files
 test_lm_models*
 model_bench_*
+/offscreen.js
+/offscreen.html
+/ort/

@@ -1033,13 +1033,24 @@ async function hydrateCurrentVideo() {
     updateTranscriptMeta(`${transcriptSegments.length} timestamped transcript lines`);
 
     state.transcriptRequestId = crypto.randomUUID();
-    void postToBackground({
-      type: 'starter-questions',
-      requestId: state.transcriptRequestId,
-      title: getVideoTitle(),
-      videoUrl: location.href,
-      transcriptText: state.transcriptText
-    }, { silent: true });
+    
+    // Check if auto-questions are disabled
+    chrome.storage.sync.get({ disableAutoQuestions: false }, (settings) => {
+      if (settings.disableAutoQuestions) {
+        state.starterQuestions = [];
+        state.startersDismissed = true;
+        renderStarters();
+        return;
+      }
+      
+      void postToBackground({
+        type: 'starter-questions',
+        requestId: state.transcriptRequestId,
+        title: getVideoTitle(),
+        videoUrl: location.href,
+        transcriptText: state.transcriptText
+      }, { silent: true });
+    });
   } catch (error) {
     state.transcriptStatus = 'Transcript unavailable';
     state.messages = [

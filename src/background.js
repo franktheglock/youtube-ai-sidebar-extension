@@ -1,3 +1,4 @@
+
 const DEFAULT_SETTINGS = {
   provider: 'openrouter',
   model: 'openai/gpt-4.1-mini',
@@ -8,8 +9,34 @@ const DEFAULT_SETTINGS = {
   openrouterBaseUrl: 'https://openrouter.ai/api/v1',
   searchProvider: 'duckduckgo',
   searxngBaseUrl: 'http://192.168.1.70:8888',
-  temperature: 0.2
+  temperature: 0.7,
+  disableAutoQuestions: false
 };
+
+// ── Transformers.js: static model catalog ──────────────────────────────────────
+const TRANSFORMERS_JS_MODELS = [
+  {
+    id: 'onnx-community/Qwen3.5-2B-ONNX',
+    name: 'Qwen 3.5 2B',
+    ownedBy: 'Alibaba / onnx-community',
+    contextLength: 32768
+  },
+  {
+    id: 'onnx-community/gemma-4-E2B-it-ONNX',
+    name: 'Gemma 4 E2B',
+    ownedBy: 'Google / onnx-community',
+    contextLength: 32768
+  },
+  {
+    id: 'LiquidAI/LFM2.5-1.2B-Instruct-ONNX',
+    name: 'LFM 2.5 1.2B',
+    ownedBy: 'Liquid AI',
+    contextLength: 32768
+  }
+];
+
+// Cache the loaded pipeline so we don't reload on every message
+let _tjsOffscreenReady = false;
 
 const portState = new WeakMap();
 
@@ -45,6 +72,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === 'set-active-model') {
     void handleSetActiveModel(message, sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'tjs-model-cached') {
+    // Track which models have been downloaded
+    chrome.storage.local.get({ tjsCachedModels: {} }, (data) => {
+      const cached = data.tjsCachedModels || {};
+      cached[message.modelId] = { cachedAt: Date.now() };
+      chrome.storage.local.set({ tjsCachedModels: cached });
+    });
+    return false;
+  }
+
+  if (message?.type === 'tjs-check-cache') {
+    void (async () => {
+      try {
+        await ensureOffscreenDocument();
+        const result = await chrome.runtime.sendMessage(message);
+        sendResponse(result);
+      } catch (error) {
+        sendResponse({ ok: false, error: error?.message || 'Cache check failed.' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'tjs-delete-model') {
+    void (async () => {
+      try {
+        await ensureOffscreenDocument();
+        const result = await chrome.runtime.sendMessage(message);
+        
+        // Clear from local storage tracking as well
+        if (result?.ok) {
+          chrome.storage.local.get({ tjsCachedModels: {} }, (data) => {
+            const cached = data.tjsCachedModels || {};
+            delete cached[message.modelId];
+            chrome.storage.local.set({ tjsCachedModels: cached });
+          });
+        }
+        
+        sendResponse(result);
+      } catch (error) {
+        sendResponse({ ok: false, error: error?.message || 'Model deletion failed.' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'tjs-download-model') {
+    void (async () => {
+      try {
+        await ensureOffscreenDocument();
+        const result = await chrome.runtime.sendMessage(message);
+        sendResponse(result);
+      } catch (error) {
+        sendResponse({ ok: false, error: error?.message || 'Model download failed.' });
+      }
+    })();
     return true;
   }
 
@@ -120,9 +206,24 @@ async function handleChat(port, message) {
       toolMessages: []
     });
 
-    sendAssistantStatus(port, message.requestId, 'Generating answer...');
-
-    if (supportsToolCalling(provider)) {
+    if (provider.kind === 'transformers-js') {
+      await transformersJsGenerate({
+        modelId: provider.model,
+        messages: baseMessages,
+        signal: state.controller.signal,
+        temperature: settings.temperature,
+        port,
+        requestId: message.requestId,
+        onChunk: (chunk) => {
+          port.postMessage({
+            type: 'assistant-chunk',
+            requestId: message.requestId,
+            chunk
+          });
+        }
+      });
+    } else if (supportsToolCalling(provider)) {
+      sendAssistantStatus(port, message.requestId, 'Generating answer...');
       const result = await streamChatWithTools({
         provider,
         settings,
@@ -147,6 +248,7 @@ async function handleChat(port, message) {
         sources: result.sources
       });
     } else {
+      sendAssistantStatus(port, message.requestId, 'Generating answer...');
       await streamChatCompletion({
         provider,
         messages: baseMessages,
@@ -212,12 +314,27 @@ async function handleStarterQuestions(port, message) {
       }
     ];
 
-    const raw = await completeChatCompletion({
-      provider,
-      messages: prompt,
-      signal: state.controller.signal,
-      temperature: 0.3
-    });
+    let raw;
+    if (provider.kind === 'transformers-js') {
+      let accumulated = '';
+      await transformersJsGenerate({
+        modelId: provider.model,
+        messages: prompt,
+        signal: state.controller.signal,
+        temperature: 0.3,
+        port,
+        requestId: message.requestId,
+        onChunk: (chunk) => { accumulated += chunk; }
+      });
+      raw = accumulated;
+    } else {
+      raw = await completeChatCompletion({
+        provider,
+        messages: prompt,
+        signal: state.controller.signal,
+        temperature: 0.3
+      });
+    }
 
     const parsed = safeJsonParse(extractJsonBlock(raw));
     const questions = Array.isArray(parsed?.questions)
@@ -650,6 +767,15 @@ function registerSource({ url, title, sourceByUrl, sources }) {
 }
 
 function getProviderConfig(settings) {
+  if (settings.provider === 'transformers-js') {
+    return {
+      kind: 'transformers-js',
+      model: settings.model || TRANSFORMERS_JS_MODELS[0].id,
+      baseUrl: '',
+      headers: {}
+    };
+  }
+
   if (settings.provider === 'lmstudio') {
     return {
       kind: 'lmstudio',
@@ -785,6 +911,14 @@ function buildProviderCatalogConfigs(settings) {
       enabled: Boolean(settings.nvidiaNimApiKey),
       reason: settings.nvidiaNimApiKey ? '' : 'NVIDIA NIM API key is missing.',
       configFactory: () => getProviderConfig({ ...settings, provider: 'nvidia-nim' })
+    },
+    {
+      key: 'transformers-js',
+      label: 'Transformers.js (Experimental)',
+      enabled: true,
+      reason: '',
+      static: true,
+      configFactory: () => getProviderConfig({ ...settings, provider: 'transformers-js' })
     }
   ];
 }
@@ -797,6 +931,17 @@ async function fetchProviderModels(providerDescriptor) {
       available: false,
       error: providerDescriptor.reason,
       models: []
+    };
+  }
+
+  // Static catalog for Transformers.js — no remote fetch needed
+  if (providerDescriptor.static) {
+    return {
+      provider: providerDescriptor.key,
+      label: providerDescriptor.label,
+      available: true,
+      error: '',
+      models: [...TRANSFORMERS_JS_MODELS]
     };
   }
 
@@ -1361,6 +1506,9 @@ function getChatTools() {
 }
 
 function supportsToolCalling(provider) {
+  if (provider?.kind === 'transformers-js') {
+    return false;
+  }
   return provider?.kind === 'openrouter' || provider?.kind === 'nvidia-nim' || provider?.kind === 'lmstudio';
 }
 
@@ -1376,4 +1524,162 @@ function flattenAssistantMessageContent(content) {
   return content
     .map((item) => item?.text || '')
     .join('');
+}
+
+// ── Transformers.js: offscreen document bridge ─────────────────────────────────
+
+/**
+ * Ensure the offscreen document is created.
+ * The offscreen document hosts the actual Transformers.js pipeline.
+ */
+async function ensureOffscreenDocument() {
+  if (_tjsOffscreenReady) {
+    return;
+  }
+
+  // Check if an offscreen document already exists
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT']
+  });
+
+  if (contexts.length > 0) {
+    _tjsOffscreenReady = true;
+    return;
+  }
+
+  await chrome.offscreen.createDocument({
+    url: 'offscreen.html',
+    reasons: ['WORKERS'],
+    justification: 'Run Transformers.js ONNX model inference with WebGPU/WASM (requires DOM context).'
+  });
+
+  _tjsOffscreenReady = true;
+}
+
+/**
+ * Generate a response using the offscreen document + Transformers.js.
+ * Streams status updates via port messages, then emits the final text as chunks.
+ */
+async function transformersJsGenerate({ modelId, messages, signal, temperature, port, requestId, onChunk }) {
+  const keepAliveInterval = setInterval(() => {
+    try { chrome.runtime.getPlatformInfo(); } catch {}
+  }, 20000);
+
+  try {
+    await ensureOffscreenDocument();
+
+    if (signal.aborted) {
+      throw new DOMException('The request was aborted.', 'AbortError');
+    }
+
+    // Flatten messages for the offscreen document
+    const chatMessages = flattenMessagesForTransformersJs(messages);
+
+    // Listen for status updates from the offscreen document
+    const statusListener = (msg) => {
+      if (msg?.type === 'tjs-status' && msg.requestId === requestId) {
+        // Forward the status text to the sidebar
+        const statusText = msg.text || '';
+        if (statusText) {
+          sendAssistantStatus(port, requestId, statusText);
+        }
+        // Forward download progress for richer UI
+        if (msg.overallProgress !== undefined) {
+          port.postMessage({
+            type: 'assistant-download-progress',
+            requestId,
+            progress: msg.overallProgress,
+            file: msg.file || '',
+            filesTotal: msg.filesTotal || 0,
+            filesCompleted: msg.filesCompleted || 0
+          });
+        }
+      }
+    };
+    chrome.runtime.onMessage.addListener(statusListener);
+
+    try {
+      // Send generation request to offscreen document
+      const response = await chrome.runtime.sendMessage({
+        type: 'tjs-generate',
+        requestId,
+        modelId,
+        messages: chatMessages,
+        temperature
+      });
+
+      if (signal.aborted) {
+        throw new DOMException('The request was aborted.', 'AbortError');
+      }
+
+      if (!response?.ok) {
+        throw new Error(response?.error || 'Transformers.js inference failed.');
+      }
+
+      // Stream the text as chunks for visual effect
+      const text = response.text || '';
+      if (text) {
+        const chunkSize = 8;
+        for (let i = 0; i < text.length; i += chunkSize) {
+          if (signal.aborted) {
+            throw new DOMException('The request was aborted.', 'AbortError');
+          }
+          onChunk(text.slice(i, i + chunkSize));
+        }
+      }
+    } finally {
+      chrome.runtime.onMessage.removeListener(statusListener);
+    }
+  } finally {
+    clearInterval(keepAliveInterval);
+  }
+}
+
+/**
+ * Convert the extension's internal message format into a simple
+ * { role, content } array suitable for Transformers.js chat templates.
+ * Importantly, ensures any system messages are hoisted to the very beginning.
+ */
+function flattenMessagesForTransformersJs(messages) {
+  const systemMessages = [];
+  const otherMessages = [];
+
+  for (const msg of messages) {
+    if (!msg || !msg.role) continue;
+
+    let text = '';
+    if (typeof msg.content === 'string') {
+      text = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      // Flatten multimodal content to text only (images not supported locally)
+      text = msg.content
+        .filter((item) => item?.type === 'text' && typeof item.text === 'string')
+        .map((item) => item.text)
+        .join('\n\n');
+    }
+
+    if (!text.trim()) continue;
+
+    // Aggressive clamp to prevent WebGPU memory bounds / Integer Overflow
+    // on long YouTube transcripts for local 2B models (clamps to ~3,000 tokens).
+    const MAX_LOCAL_CHARS = 12000;
+    if (text.length > MAX_LOCAL_CHARS) {
+      text = text.slice(0, MAX_LOCAL_CHARS) + '\n\n[... Transcript Truncated for Local Memory Limits ...]';
+    }
+
+    if (msg.role === 'system') {
+      systemMessages.push(text.trim());
+    } else {
+      otherMessages.push({ role: msg.role, content: text.trim() });
+    }
+  }
+
+  const result = [];
+  if (systemMessages.length > 0) {
+    result.push({ role: 'system', content: systemMessages.join('\n\n') });
+  }
+  
+  result.push(...otherMessages);
+
+  return result;
 }

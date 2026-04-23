@@ -8,7 +8,8 @@ const DEFAULT_SETTINGS = {
   openrouterBaseUrl: 'https://openrouter.ai/api/v1',
   searchProvider: 'duckduckgo',
   searxngBaseUrl: 'http://192.168.1.70:8888',
-  temperature: 0.2
+  temperature: 0.2,
+  disableAutoQuestions: false
 };
 
 const app = document.getElementById('app');
@@ -420,9 +421,10 @@ async function render() {
           <label>
             <span class="field-label"><span class="field-label__name">Provider</span><span class="field-label__hint">Stream target</span></span>
             <select name="provider">
-              <option value="openrouter" ${settings.provider === 'openrouter' ? 'selected' : ''}>OpenRouter</option>
-              <option value="lmstudio" ${settings.provider === 'lmstudio' ? 'selected' : ''}>LM Studio</option>
-              <option value="nvidia-nim" ${settings.provider === 'nvidia-nim' ? 'selected' : ''}>NVIDIA NIM</option>
+              <option value="openrouter" ${settings.provider === "openrouter" ? "selected" : ""}>OpenRouter</option>
+              <option value="lmstudio" ${settings.provider === "lmstudio" ? "selected" : ""}>LM Studio</option>
+              <option value="nvidia-nim" ${settings.provider === "nvidia-nim" ? "selected" : ""}>NVIDIA NIM</option>
+              <option value="transformers-js" ${settings.provider === "transformers-js" ? "selected" : ""}>Transformers.js (Experimental)</option>
             </select>
           </label>
           <label>
@@ -434,8 +436,54 @@ async function render() {
           </label>
           <label>
             <span class="field-label"><span class="field-label__name">Model</span><span class="field-label__hint">Provider-specific</span></span>
-            <input name="model" value="${escapeHtml(settings.model)}" />
+            <div data-role="model-container">
+              <input name="model" value="${escapeHtml(settings.model)}" data-role="model-input" style="${settings.provider === 'transformers-js' ? 'display:none' : ''}" />
+              <select name="model-select" data-role="model-select" style="${settings.provider === 'transformers-js' ? '' : 'display:none'}">
+                <option value="onnx-community/Qwen3.5-2B-ONNX" ${settings.model === 'onnx-community/Qwen3.5-2B-ONNX' ? 'selected' : ''}>Qwen 3.5 2B</option>
+                <option value="onnx-community/gemma-4-E2B-it-ONNX" ${settings.model === 'onnx-community/gemma-4-E2B-it-ONNX' ? 'selected' : ''}>Gemma 4 E2B</option>
+                <option value="LiquidAI/LFM2.5-1.2B-Instruct-ONNX" ${settings.model === 'LiquidAI/LFM2.5-1.2B-Instruct-ONNX' ? 'selected' : ''}>LFM 2.5 1.2B</option>
+              </select>
+            </div>
           </label>
+          <div data-role="tjs-notice" style="${settings.provider === 'transformers-js' ? '' : 'display:none'}; grid-column: 1 / -1;">
+            <div style="padding: 12px 14px; border: 1px solid rgba(255, 50, 50, 0.25); border-radius: 14px; background: rgba(255, 50, 50, 0.06); font-size: 12px; line-height: 1.55; color: var(--text-muted); margin-bottom: 12px;">
+              <strong style="color: #ff6b6b;">🚨 BROKEN / HIGHLY EXPERIMENTAL ATM</strong><br>
+              Transformers.js runs the language model locally in your browser leveraging WebGPU. <strong style="color:var(--text);">Current ONNX models are highly unstable on long YouTube transcripts and frequently crash WebGPU buffers.</strong> Use with caution. Expect crashes until upstream fixes are released.<br>
+              <span style="color: var(--text-faint);">• First load downloads 600MB–1.5GB (cached after)&nbsp; • Requires WebGPU-capable browser&nbsp; • Web search and URL tools are disabled</span>
+            </div>
+            <div style="padding: 14px; border: 1px solid var(--line-soft); border-radius: 14px; background: var(--panel-elevated);">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+                <span style="font-size: 12px; font-weight: 600; color: var(--text); letter-spacing: 0.04em;">Downloaded Models</span>
+                <span data-role="tjs-cache-total" style="font-size: 11px; color: var(--text-faint);"></span>
+              </div>
+              <div data-role="tjs-model-list" style="display: grid; gap: 8px;">
+                <div data-tjs-model="onnx-community/Qwen3.5-2B-ONNX" style="display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 10px; background: var(--panel-soft); font-size: 12px;">
+                  <span style="color: var(--text);">Qwen 3.5 2B</span>
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <span data-role="tjs-badge" style="color: var(--text-faint); font-size: 11px;">Checking...</span>
+                    <button type="button" data-role="tjs-download" data-model="onnx-community/Qwen3.5-2B-ONNX" style="display: none; padding: 4px 8px; font-size: 10px; border-radius: 6px; background: rgba(143, 208, 161, 0.15); color: #8fd0a1; border: 1px solid rgba(143, 208, 161, 0.2); cursor: pointer;">Download</button>
+                    <button type="button" data-role="tjs-delete" data-model="onnx-community/Qwen3.5-2B-ONNX" style="display: none; padding: 4px 8px; font-size: 10px; border-radius: 6px; background: rgba(255, 50, 50, 0.15); color: #ff6b6b; border: 1px solid rgba(255, 50, 50, 0.2); cursor: pointer;">Delete</button>
+                  </div>
+                </div>
+                <div data-tjs-model="onnx-community/gemma-4-E2B-it-ONNX" style="display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 10px; background: var(--panel-soft); font-size: 12px;">
+                  <span style="color: var(--text);">Gemma 4 E2B</span>
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <span data-role="tjs-badge" style="color: var(--text-faint); font-size: 11px;">Checking...</span>
+                    <button type="button" data-role="tjs-download" data-model="onnx-community/gemma-4-E2B-it-ONNX" style="display: none; padding: 4px 8px; font-size: 10px; border-radius: 6px; background: rgba(143, 208, 161, 0.15); color: #8fd0a1; border: 1px solid rgba(143, 208, 161, 0.2); cursor: pointer;">Download</button>
+                    <button type="button" data-role="tjs-delete" data-model="onnx-community/gemma-4-E2B-it-ONNX" style="display: none; padding: 4px 8px; font-size: 10px; border-radius: 6px; background: rgba(255, 50, 50, 0.15); color: #ff6b6b; border: 1px solid rgba(255, 50, 50, 0.2); cursor: pointer;">Delete</button>
+                  </div>
+                </div>
+                <div data-tjs-model="LiquidAI/LFM2.5-1.2B-Instruct-ONNX" style="display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 10px; background: var(--panel-soft); font-size: 12px;">
+                  <span style="color: var(--text);">LFM 2.5 1.2B</span>
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <span data-role="tjs-badge" style="color: var(--text-faint); font-size: 11px;">Checking...</span>
+                    <button type="button" data-role="tjs-download" data-model="LiquidAI/LFM2.5-1.2B-Instruct-ONNX" style="display: none; padding: 4px 8px; font-size: 10px; border-radius: 6px; background: rgba(143, 208, 161, 0.15); color: #8fd0a1; border: 1px solid rgba(143, 208, 161, 0.2); cursor: pointer;">Download</button>
+                    <button type="button" data-role="tjs-delete" data-model="LiquidAI/LFM2.5-1.2B-Instruct-ONNX" style="display: none; padding: 4px 8px; font-size: 10px; border-radius: 6px; background: rgba(255, 50, 50, 0.15); color: #ff6b6b; border: 1px solid rgba(255, 50, 50, 0.2); cursor: pointer;">Delete</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
           <label>
             <span class="field-label"><span class="field-label__name">Temperature</span><span class="field-label__hint">0.0 - 2.0</span></span>
             <input name="temperature" type="number" min="0" max="2" step="0.1" value="${settings.temperature}" />
@@ -485,7 +533,16 @@ async function render() {
             </div>
           </div>
           <p class="note">The extension streams final answers from the selected model provider. Before the streamed response starts, it can also read pasted URLs and run web lookups through the selected search provider.</p>
-          <div class="actions">
+          <div class="setting-group advanced-block">
+          <label>General Preferences</label>
+          <div class="checkbox-setting">
+            <input type="checkbox" id="disableAutoQuestions" name="disableAutoQuestions" ${settings.disableAutoQuestions ? 'checked' : ''}>
+            <label for="disableAutoQuestions" style="display:inline;font-size:13px;">Disable Automatic Starter Questions</label>
+            <p style="margin-top:4px;font-size:12px;color:var(--text-faint);">If checked, the extension will no longer automatically ask the LLM to generate initial questions when a transcript loads. Saves API credits/local processing power.</p>
+          </div>
+        </div>
+
+        <div class="actions">
             <button type="submit">Save settings</button>
             <span class="status" data-role="status">Settings are stored in chrome.storage.sync.</span>
           </div>
@@ -510,13 +567,184 @@ async function render() {
       openrouterBaseUrl: String(formData.get('openrouterBaseUrl') || DEFAULT_SETTINGS.openrouterBaseUrl),
       searchProvider: String(formData.get('searchProvider') || DEFAULT_SETTINGS.searchProvider),
       searxngBaseUrl: String(formData.get('searxngBaseUrl') || DEFAULT_SETTINGS.searxngBaseUrl),
-      temperature: Number(formData.get('temperature') || DEFAULT_SETTINGS.temperature)
+      temperature: Number(formData.get('temperature') || DEFAULT_SETTINGS.temperature),
+      disableAutoQuestions: formData.get('disableAutoQuestions') === 'on'
     };
 
     await setSettings(nextSettings);
-    status.textContent = 'Saved. Reload the extension or refresh YouTube tabs if needed.';
+    status.textContent = "Saved. Reload the extension or refresh YouTube tabs if needed.";
   });
+
+  // Dynamic provider switching for Transformers.js
+  const providerSelect = form.querySelector('[name="provider"]');
+  const modelInput = form.querySelector('[data-role="model-input"]');
+  const modelSelect = form.querySelector('[data-role="model-select"]');
+  const tjsNotice = form.querySelector('[data-role="tjs-notice"]');
+
+  providerSelect.addEventListener('change', () => {
+    const isTjs = providerSelect.value === 'transformers-js';
+    modelInput.style.display = isTjs ? 'none' : '';
+    modelSelect.style.display = isTjs ? '' : 'none';
+    tjsNotice.style.display = isTjs ? '' : 'none';
+
+    if (isTjs) {
+      modelInput.value = modelSelect.value;
+      checkTjsModelCache();
+    }
+  });
+
+  modelSelect.addEventListener('change', () => {
+    modelInput.value = modelSelect.value;
+  });
+
+  // Check cache on initial load if provider is transformers-js
+  if (settings.provider === 'transformers-js') {
+    checkTjsModelCache();
+  }
 }
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(2) + ' GB';
+}
+
+function checkTjsModelCache() {
+  const modelIds = [
+    'onnx-community/Qwen3.5-2B-ONNX',
+    'onnx-community/gemma-4-E2B-it-ONNX',
+    'LiquidAI/LFM2.5-1.2B-Instruct-ONNX'
+  ];
+
+  chrome.runtime.sendMessage(
+    { type: 'tjs-check-cache', modelIds },
+    (response) => {
+      if (chrome.runtime.lastError || !response?.ok) {
+        // Fallback: just check chrome.storage.local for cached flags
+        chrome.storage.local.get({ tjsCachedModels: {} }, (data) => {
+          const cached = data.tjsCachedModels || {};
+          for (const modelId of modelIds) {
+            const row = document.querySelector(`[data-tjs-model="${modelId}"]`);
+            if (!row) continue;
+            const badge = row.querySelector('[data-role="tjs-badge"]');
+            const deleteBtn = row.querySelector('[data-role="tjs-delete"]');
+            const downloadBtn = row.querySelector('[data-role="tjs-download"]');
+            if (!badge) continue;
+
+            if (cached[modelId]) {
+              badge.textContent = '✓ Cached';
+              badge.style.color = '#8fd0a1';
+              if (deleteBtn) deleteBtn.style.display = 'block';
+              if (downloadBtn) downloadBtn.style.display = 'none';
+            } else {
+              badge.textContent = 'Not downloaded';
+              badge.style.color = 'var(--text-faint)';
+              if (deleteBtn) deleteBtn.style.display = 'none';
+              if (downloadBtn) downloadBtn.style.display = 'block';
+            }
+          }
+        });
+        return;
+      }
+
+      const { cached, totalCacheSize } = response;
+
+      // Update total cache size
+      const totalEl = document.querySelector('[data-role="tjs-cache-total"]');
+      if (totalEl) {
+        totalEl.textContent = totalCacheSize > 0 ? `Total: ${formatBytes(totalCacheSize)}` : '';
+      }
+
+      for (const modelId of modelIds) {
+        const row = document.querySelector(`[data-tjs-model="${modelId}"]`);
+        if (!row) continue;
+        const badge = row.querySelector('[data-role="tjs-badge"]');
+        const deleteBtn = row.querySelector('[data-role="tjs-delete"]');
+        const downloadBtn = row.querySelector('[data-role="tjs-download"]');
+        if (!badge) continue;
+
+        const info = cached?.[modelId];
+        if (info?.downloaded) {
+          const size = info.sizeBytes > 0 ? formatBytes(info.sizeBytes) : '';
+          const files = info.fileCount > 0 ? `${info.fileCount} files` : '';
+          const detail = [size, files].filter(Boolean).join(' · ');
+          badge.textContent = `✓ ${detail || 'Cached'}`;
+          badge.style.color = '#8fd0a1';
+          if (deleteBtn) deleteBtn.style.display = 'block';
+          if (downloadBtn) downloadBtn.style.display = 'none';
+        } else {
+          badge.textContent = 'Not downloaded';
+          badge.style.color = 'var(--text-faint)';
+          if (deleteBtn) deleteBtn.style.display = 'none';
+          if (downloadBtn) downloadBtn.style.display = 'block';
+        }
+      }
+    }
+  );
+}
+
+// Listen for download progress updates during standalone downloads
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'tjs-download-progress') {
+    const { modelId, text, overallProgress } = message;
+    const row = document.querySelector(`[data-tjs-model="${modelId}"]`);
+    if (!row) return;
+
+    const badge = row.querySelector('[data-role="tjs-badge"]');
+    if (badge) {
+      badge.textContent = text || `Downloading... ${overallProgress}%`;
+      badge.style.color = '#a3c2ff';
+    }
+
+    const downloadBtn = row.querySelector('[data-role="tjs-download"]');
+    if (downloadBtn) {
+      downloadBtn.style.display = 'none'; // Hide while downloading
+    }
+  }
+});
+
+// Global delegated listener for delete and download buttons
+document.addEventListener('click', async (e) => {
+  const deleteBtn = e.target.closest('[data-role="tjs-delete"]');
+  if (deleteBtn) {
+    const modelId = deleteBtn.getAttribute('data-model');
+    if (!modelId) return;
+
+    const confirmDelete = confirm(`Are you sure you want to delete ${modelId} from your local cache? You will need to re-download it to use it again.`);
+    if (!confirmDelete) return;
+
+    deleteBtn.textContent = 'Deleting...';
+    deleteBtn.disabled = true;
+    deleteBtn.style.opacity = '0.5';
+
+    chrome.runtime.sendMessage({ type: 'tjs-delete-model', modelId }, (response) => {
+      deleteBtn.disabled = false;
+      deleteBtn.style.opacity = '1';
+      deleteBtn.textContent = 'Delete';
+      if (chrome.runtime.lastError || !response?.ok) {
+        alert(`Failed to delete model: ${chrome.runtime.lastError?.message || response?.error || 'Unknown error'}`);
+      }
+      checkTjsModelCache();
+    });
+    return;
+  }
+
+  const downloadBtn = e.target.closest('[data-role="tjs-download"]');
+  if (downloadBtn) {
+    const modelId = downloadBtn.getAttribute('data-model');
+    if (!modelId) return;
+
+    downloadBtn.style.display = 'none';
+
+    chrome.runtime.sendMessage({ type: 'tjs-download-model', modelId }, (response) => {
+      if (chrome.runtime.lastError || !response?.ok) {
+        alert(`Failed to download model: ${chrome.runtime.lastError?.message || response?.error || 'Unknown error'}`);
+      }
+      checkTjsModelCache();
+    });
+  }
+});
 
 function getSettings() {
   return new Promise((resolve) => {
