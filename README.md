@@ -12,7 +12,7 @@ It pulls the current video's transcript, streams answers in place, links timesta
 - Suggested starter questions for each video
 - Optional web context via:
 	- `web_search` against a SearxNG instance or DuckDuckgo
-	- `read_url` for pasted URLs in prompts
+	- `read_url` for getting web content from search results 
 - Support for multiple model providers:
 	- OpenRouter
 	- LM Studio
