@@ -112,6 +112,7 @@ function handlePortMessage(message) {
         lastMessage.reasoningPreview = lastMessage.reasoningPreview || 'Thinking…';
       } else if (message.chunk.includes('</details>')) {
         state.activeRequestReasoningActive = false;
+        lastMessage.reasoningPreview = '';
       } else if (state.activeRequestReasoningActive) {
         lastMessage.reasoningPreview = (lastMessage.reasoningPreview === 'Thinking…' ? '' : lastMessage.reasoningPreview) + message.chunk;
       }
@@ -135,6 +136,10 @@ function handlePortMessage(message) {
   if (message.type === 'assistant-done') {
     state.activeRequestReasoningActive = false;
     state.activeRequestReasoningOpen = false;
+    const lastMessage = state.messages.at(-1);
+    if (lastMessage?.role === 'assistant') {
+      lastMessage.reasoningPreview = '';
+    }
     clearActiveRequestTracking();
     state.activeRequestId = null;
     updateStatus('Ready');
@@ -1398,7 +1403,11 @@ function renderMarkdown(text, sources) {
 
 function injectThinkingPreview(html, previewText) {
   const summaryText = summarizeThinkingPreview(previewText || '');
-  const rendered = summaryText ? renderMarkdown(summaryText) : 'Thinking…';
+  if (!summaryText) {
+    return html.replace('<span class="thinking-pill__preview"></span>', '');
+  }
+
+  const rendered = renderMarkdown(summaryText);
   return html.replace(
     '<span class="thinking-pill__preview"></span>',
     `<span class="thinking-pill__preview"><span class="thinking-pill__preview-text">${rendered}</span></span>`
@@ -1698,6 +1707,9 @@ function buildShell() {
 
       .header__model-button svg:last-child {
         flex-shrink: 0;
+        width: 14px;
+        height: 14px;
+        margin-left: 2px;
         transition: transform 150ms ease;
       }
 
@@ -2436,7 +2448,7 @@ function buildShell() {
           <button type="button" class="header__model-button" data-action="toggle-model-picker" aria-haspopup="dialog" aria-expanded="false">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"></path><path d="M3 12h18"></path><circle cx="12" cy="12" r="9"></circle></svg>
             <span class="header__model-label" data-role="model-picker-label">Choose model</span>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
           </button>
           <button type="button" data-action="new-chat" title="New Chat">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path><line x1="12" y1="8" x2="12" y2="14"></line><line x1="9" y1="11" x2="15" y2="11"></line></svg>
