@@ -11,7 +11,7 @@ It pulls the current video's transcript, streams answers in place, links timesta
 - Streamed responses in the sidebar UI
 - Suggested starter questions for each video
 - Optional web context via:
-	- `web_search` against a SearxNG instance
+	- `web_search` against a SearxNG instance or DuckDuckgo
 	- `read_url` for pasted URLs in prompts
 - Support for multiple model providers:
 	- OpenRouter
@@ -78,14 +78,6 @@ http://192.168.1.70:8888
 - Web-backed claims are instructed to cite numeric sources such as `[1]`
 - Citation pills render the source number plus the site's favicon
 - Timestamp links are converted into clickable seek actions in the player
-
-## Publishing Notes
-
-Before pushing to GitHub or shipping the extension:
-
-- Build once so the unpacked extension is ready to load locally
-- Keep API keys in the extension options storage, not in source files
-- Do not commit `node_modules/` or generated root build files
 
 ## License
 
